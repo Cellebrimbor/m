@@ -1,7 +1,10 @@
 import os
 import zipfile
 import shutil
+import smtplib
 import requests
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
@@ -16,6 +19,18 @@ from pathlib import Path
 # Создаем приложение
 app = Flask(__name__)
 
+# CORS: разрешаем запросы с приложения (Android/эмулятор)
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def options_api(path):
+    return '', 204
+
 # Конфигурация
 app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///messenger.db'
@@ -25,7 +40,15 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 
 # URL сервера с контентом (второй сервер)
-app.config['CONTENT_SERVER_URL'] = 'http://files.vasamuseum.shop'  # ✅ Локальный сервер контента  # Замените на реальный URL второго сервера
+app.config['CONTENT_SERVER_URL'] = 'http://127.0.0.1:5005'  # ✅ Локальный сервер контента  # Замените на реальный URL второго сервера
+
+# Почта (опционально): задайте переменные окружения для отправки писем при регистрации и входе
+app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', '')
+app.config['MAIL_PORT'] = int(os.environ.get('MAIL_PORT', '587'))
+app.config['MAIL_USE_TLS'] = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', '')
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', '')
+app.config['MAIL_FROM'] = os.environ.get('MAIL_FROM') or os.environ.get('MAIL_USERNAME', '')
 
 # Инициализация расширений
 db = SQLAlchemy(app)
@@ -285,6 +308,29 @@ def is_valid_username(username):
     pattern = r'^[a-zA-Z0-9_]{3,30}$'
     return re.match(pattern, username) is not None
 
+
+def send_email(to_email: str, subject: str, body_text: str, body_html: str = None):
+    """Отправка письма при регистрации и входе. Если MAIL_SERVER не задан — пропуск без ошибки."""
+    if not (app.config.get('MAIL_SERVER') and app.config.get('MAIL_USERNAME') and app.config.get('MAIL_PASSWORD')):
+        return
+    from_addr = app.config.get('MAIL_FROM') or app.config.get('MAIL_USERNAME')
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = from_addr
+        msg['To'] = to_email
+        msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
+        if body_html:
+            msg.attach(MIMEText(body_html, 'html', 'utf-8'))
+        with smtplib.SMTP(app.config['MAIL_SERVER'], app.config['MAIL_PORT'], timeout=10) as server:
+            if app.config['MAIL_USE_TLS']:
+                server.starttls()
+            server.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
+            server.sendmail(from_addr, to_email, msg.as_string())
+    except Exception as e:
+        print(f"⚠️ Ошибка отправки письма на {to_email}: {e}")
+
+
 def sync_with_content_server():
     """Синхронизирует метаданные со вторым сервером контента"""
     try:
@@ -368,6 +414,14 @@ def sync_with_content_server():
 def health_check():
     return jsonify({'status': 'ok', 'message': 'Server is running'}), 200
 
+# ==================== АВТОРИЗАЦИЯ (контракт для клиента) ====================
+# POST /api/register: body { username, email, password }
+#   → 201: { access_token, user: { id, username, email, ... } }
+#   → 400/409: { error: "..." }
+# POST /api/login: body { login, password }  (login = username или email)
+#   → 200: { access_token, user: { id, username, email, ... } }
+#   → 401: { error: "Invalid credentials" }
+
 @app.route('/api/register', methods=['POST'])
 def register():
     try:
@@ -425,6 +479,15 @@ def register():
             expires_delta=timedelta(days=7)
         )
         
+        # Письмо при регистрации (если настроена почта)
+        send_email(
+            new_user.email,
+            'Добро пожаловать!',
+            f'Здравствуйте, {new_user.display_name or new_user.username}!\n\nВы успешно зарегистрировались. Ваш логин: {new_user.username}.',
+            f'<p>Здравствуйте, <b>{new_user.display_name or new_user.username}</b>!</p><p>Вы успешно зарегистрировались. Ваш логин: <b>{new_user.username}</b>.</p>'
+        )
+        
+        # Ответ в формате, ожидаемом клиентом: access_token, user { id, username, email }
         return jsonify({
             'message': 'User registered successfully',
             'user': new_user.to_dict(),
@@ -524,6 +587,16 @@ def login():
             expires_delta=timedelta(days=7)
         )
         
+        # Уведомление о входе на почту (если настроена)
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+        send_email(
+            user.email,
+            'Новый вход в аккаунт',
+            f'Здравствуйте, {user.display_name or user.username}!\n\nВ ваш аккаунт выполнен вход: {now}. Если это были не вы, смените пароль.',
+            f'<p>Здравствуйте, <b>{user.display_name or user.username}</b>!</p><p>В ваш аккаунт выполнен вход: <b>{now}</b>.</p><p>Если это были не вы, рекомендуем сменить пароль.</p>'
+        )
+        
+        # Ответ в формате, ожидаемом клиентом: access_token, user { id, username, email }
         return jsonify({
             'message': 'Login successful',
             'user': user.to_dict(),
@@ -1037,4 +1110,6 @@ with app.app_context():
 
 # Запуск приложения
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    mail_ok = bool(app.config.get('MAIL_SERVER') and app.config.get('MAIL_USERNAME') and app.config.get('MAIL_PASSWORD'))
+    print('📧 Письма при регистрации и входе:', 'включены' if mail_ok else 'выключены (задайте MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD)')
+    app.run(debug=True, host='0.0.0.0', port=5004)
