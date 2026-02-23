@@ -9,6 +9,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
+import random
 import bcrypt
 import re
 import traceback
@@ -310,8 +311,9 @@ def is_valid_username(username):
 
 
 def send_email(to_email: str, subject: str, body_text: str, body_html: str = None):
-    """Отправка письма при регистрации и входе. Если MAIL_SERVER не задан — пропуск без ошибки."""
+    """Отправка письма. Если MAIL_SERVER не задан — пропуск и вывод в консоль."""
     if not (app.config.get('MAIL_SERVER') and app.config.get('MAIL_USERNAME') and app.config.get('MAIL_PASSWORD')):
+        print("📧 Письмо не отправлено (почта не настроена):", subject, "→", to_email)
         return
     from_addr = app.config.get('MAIL_FROM') or app.config.get('MAIL_USERNAME')
     try:
@@ -327,6 +329,7 @@ def send_email(to_email: str, subject: str, body_text: str, body_html: str = Non
                 server.starttls()
             server.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
             server.sendmail(from_addr, to_email, msg.as_string())
+        print("📧 Письмо отправлено:", subject, "→", to_email)
     except Exception as e:
         print(f"⚠️ Ошибка отправки письма на {to_email}: {e}")
 
@@ -408,11 +411,70 @@ def sync_with_content_server():
         print(f"❌ Ошибка синхронизации: {str(e)}")
         db.session.rollback()
 
+# Коды подтверждения email: { email: (code, expiry_datetime) }
+_verification_codes = {}
+
+def _clean_expired_codes():
+    now = datetime.utcnow()
+    expired = [e for e, (_, exp) in _verification_codes.items() if exp < now]
+    for e in expired:
+        del _verification_codes[e]
+
 # ==================== БАЗОВЫЕ ЭНДПОИНТЫ ====================
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'ok', 'message': 'Server is running'}), 200
+
+# ==================== КОД ПОДТВЕРЖДЕНИЯ EMAIL ====================
+
+@app.route('/api/send-verification-code', methods=['POST'])
+def send_verification_code():
+    """Отправка 6-значного кода на email. Тело: { \"email\": \"...\" }"""
+    try:
+        data = request.get_json()
+        if not data or not data.get('email'):
+            return jsonify({'error': 'Missing email'}), 400
+        email = data['email'].strip().lower()
+        if not is_valid_email(email):
+            return jsonify({'error': 'Invalid email format'}), 400
+        _clean_expired_codes()
+        code = ''.join(str(random.randint(0, 9)) for _ in range(6))
+        _verification_codes[email] = (code, datetime.utcnow() + timedelta(minutes=10))
+        subject = 'Код подтверждения регистрации'
+        body_text = f'Ваш код: {code}\nКод действителен 10 минут.'
+        body_html = f'<p>Ваш код: <b>{code}</b></p><p>Код действителен 10 минут.</p>'
+        send_email(email, subject, body_text, body_html)
+        print("📬 Код подтверждения запрошен для:", email)
+        return jsonify({'message': 'Code sent'}), 200
+    except Exception as e:
+        print("❌ send_verification_code:", e)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/verify-code', methods=['POST'])
+def verify_code():
+    """Проверка кода. Тело: { \"email\": \"...\", \"code\": \"123456\" }"""
+    try:
+        data = request.get_json()
+        if not data or not data.get('email') or not data.get('code'):
+            return jsonify({'error': 'Missing email or code'}), 400
+        email = data['email'].strip().lower()
+        code = data['code'].strip()
+        _clean_expired_codes()
+        if email not in _verification_codes:
+            return jsonify({'error': 'Code expired or not sent'}), 400
+        stored_code, expiry = _verification_codes[email]
+        if datetime.utcnow() > expiry:
+            del _verification_codes[email]
+            return jsonify({'error': 'Code expired'}), 400
+        if code != stored_code:
+            return jsonify({'error': 'Invalid code'}), 400
+        del _verification_codes[email]
+        print("✅ Код подтверждён для:", email)
+        return jsonify({'message': 'Verified'}), 200
+    except Exception as e:
+        print("❌ verify_code:", e)
+        return jsonify({'error': str(e)}), 500
 
 # ==================== АВТОРИЗАЦИЯ (контракт для клиента) ====================
 # POST /api/register: body { username, email, password }
@@ -425,6 +487,7 @@ def health_check():
 @app.route('/api/register', methods=['POST'])
 def register():
     try:
+        print("📥 POST /api/register")
         data = request.get_json()
         
         if not data:
