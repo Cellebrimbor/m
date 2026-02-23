@@ -40,7 +40,7 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 
 # URL сервера с контентом (второй сервер)
-app.config['CONTENT_SERVER_URL'] = 'http://127.0.0.1:5005'  # ✅ Локальный сервер контента  # Замените на реальный URL второго сервера
+app.config['CONTENT_SERVER_URL'] = 'http://127.0.0.1:5001'  # Сервер контента (content_server.py)
 
 # Почта (опционально): задайте переменные окружения для отправки писем при регистрации и входе
 app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', '')
@@ -1112,4 +1112,4 @@ with app.app_context():
 if __name__ == '__main__':
     mail_ok = bool(app.config.get('MAIL_SERVER') and app.config.get('MAIL_USERNAME') and app.config.get('MAIL_PASSWORD'))
     print('📧 Письма при регистрации и входе:', 'включены' if mail_ok else 'выключены (задайте MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD)')
-    app.run(debug=True, host='0.0.0.0', port=5004)
+    app.run(debug=True, host='0.0.0.0', port=5000)
