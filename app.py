@@ -431,9 +431,11 @@ def health_check():
 @app.route('/api/send-verification-code', methods=['POST'])
 def send_verification_code():
     """Отправка 6-значного кода на email. Тело: { \"email\": \"...\" }"""
+    print("📥 POST /api/send-verification-code от", request.remote_addr)
     try:
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True)
         if not data or not data.get('email'):
+            print("❌ Нет email в теле запроса")
             return jsonify({'error': 'Missing email'}), 400
         email = data['email'].strip().lower()
         if not is_valid_email(email):
@@ -449,6 +451,7 @@ def send_verification_code():
         return jsonify({'message': 'Code sent'}), 200
     except Exception as e:
         print("❌ send_verification_code:", e)
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/verify-code', methods=['POST'])
@@ -626,6 +629,7 @@ def get_avatar(filename):
 @app.route('/api/login', methods=['POST'])
 def login():
     try:
+        print("📥 POST /api/login")
         data = request.get_json()
         
         if not data or not data.get('login') or not data.get('password'):
